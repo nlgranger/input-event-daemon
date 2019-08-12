@@ -1,0 +1,9 @@
+[Unit]
+Description=Input event daemon
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/input-event-daemon --config=/etc/input-event-daemon.conf
+
+[Install]
+WantedBy=multi-user.target
