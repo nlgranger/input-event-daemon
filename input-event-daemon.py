@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# vim: ts=4 sw=4 expandtab:
 
 import argparse
 import asyncio
@@ -55,10 +56,10 @@ def is_ambiguous(keys, combinations):
                for combo in combinations)
 
 
-async def event_handler(device, bindings, command_queue):
+async def event_handler(dev, bindings, command_queue):
     while True:
         # Read key
-        event = await device.async_read_one()
+        event = await dev.async_read_one()
         event = evdev.categorize(event)
         if not isinstance(event, evdev.KeyEvent) or not event.keystate == evdev.KeyEvent.key_up:
             continue
@@ -67,7 +68,7 @@ async def event_handler(device, bindings, command_queue):
         # Read extra keys if there it might be the start of a combo
         try:
             while is_ambiguous(prefix, bindings.keys()):
-                event = await asyncio.wait_for(device.async_read_one(), timeout=1)
+                event = await asyncio.wait_for(dev.async_read_one(), timeout=1)
                 event = evdev.categorize(event)
                 if not isinstance(event, evdev.KeyEvent) or not event.keystate == evdev.KeyEvent.key_up:
                     continue
@@ -81,7 +82,7 @@ async def event_handler(device, bindings, command_queue):
 
         for keys, commands in bindings.items():
             if prefix == keys:
-                logger.debug(f"handling {'+'.join(prefix)} on {device.path}")
+                logger.debug("handling {} on {}".format('+'.join(prefix), dev.path))
                 for cmd in commands:
                     command_queue.put_nowait(cmd)
 
@@ -101,10 +102,10 @@ def main():
     # Start command runner
     command_queue = multiprocessing.Queue(maxsize=100)
     user = config.get('commands', 'user', fallback="nobody")
-    group = config.get('commands', 'user', fallback="nobody")
+    group = config.get('commands', 'group', fallback="nobody")
     timeout = config.getfloat('commands', 'timeout', fallback=1)
     command_worker = multiprocessing.Process(
-        target=run_commands, args=[command_queue])
+        target=run_commands, args=[command_queue, user, group, timeout])
 
     def cleanup(*kargs):
         command_queue.put_nowait(None)
@@ -134,11 +135,11 @@ def main():
         try:
             device = evdev.InputDevice(device_name)
         except IOError as e:
-            logger.error(f"Failed to open {device_name}: {str(e)}")
+            logger.error("Failed to open {}: {}".format(device_name, str(e)))
             sys.exit(1)
         else:
-            logger.info(f"Opened device {device_name}")
-        asyncio.ensure_future(event_handler(device, bindings, command_queue))
+            logger.info("Opened device {}".format(device_name))
+            asyncio.ensure_future(event_handler(device, bindings, command_queue))
 
     loop = asyncio.get_event_loop()
     loop.run_forever()
