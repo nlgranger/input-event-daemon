@@ -97,10 +97,11 @@ def main():
     # Start command runner
     command_queue = multiprocessing.Queue(maxsize=100)
     user = config.get('commands', 'user', fallback="nobody")
-    group = config.get('commands', 'user', fallback="nobody")
+    group = config.get('commands', 'group', fallback="nobody")
+    print("user: {} - group: {}".format(user, group))
     timeout = config.getfloat('commands', 'timeout', fallback=1)
     command_worker = multiprocessing.Process(
-        target=run_commands, args=[command_queue])
+        target=run_commands, args=[command_queue, user, group, timeout])
 
     def cleanup(*kargs):
         command_queue.put_nowait(None)
@@ -130,10 +131,10 @@ def main():
         try:
             device = evdev.InputDevice(device_name)
         except IOError as e:
-            logger.error(f"Failed to open {device_name}: {str(e)}")
+            logger.error("Failed to open {}: {}".format(device_name, str(e)))
             sys.exit(1)
         else:
-            logger.info(f"Opened device {device_name}")
+            logger.info("Opened device {}".format(device_name))
         asyncio.ensure_future(event_handler(device, bindings, command_queue))
 
     loop = asyncio.get_event_loop()
