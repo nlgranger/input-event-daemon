@@ -76,14 +76,10 @@ async def event_handler(device, bindings, command_queue):
             pass
 
         # Process command
-        if prefix not in bindings.keys():  # erroneous input, discard
-            continue
-
-        for keys, commands in bindings.items():
-            if prefix == keys:
-                logger.debug(f"handling {'+'.join(prefix)} on {device.path}")
-                for cmd in commands:
-                    command_queue.put_nowait(cmd)
+        if prefix in bindings:  # erroneous input, discard
+            logger.debug(f"handling {'+'.join(prefix)} on {device.path}")
+            for cmd in bindings[prefix]:
+                command_queue.put_nowait(cmd)
 
 
 def main():
@@ -114,7 +110,7 @@ def main():
         sys.exit(0)
 
     # prevent children from capturing sigint
-    old_sig_hdl = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     command_worker.start()
     # make sure to cleanly terminate when killed
     signal.signal(signal.SIGINT, cleanup)
