@@ -77,7 +77,10 @@ async def event_handler(dev, bindings, command_queue):
             pass
 
         # Process command
-        if prefix not in bindings.keys():  # erroneous input, discard
+        try:
+            if prefix not in bindings.keys():  # erroneous input, discard
+                continue
+        except TypeError as e:
             continue
 
         for keys, commands in bindings.items():
