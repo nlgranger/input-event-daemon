@@ -11,14 +11,18 @@ import pwd
 import signal
 import subprocess
 import sys
+import textwrap
 
-import pyudev
 import evdev
+import evdev.ecodes
+import pyudev
 
 logging.basicConfig()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
+
+# Utility ---------------------------------------------------------------------
 
 def drop_privileges(uid_name='nobody', gid_name='nobody'):
     """Drop user an group for current process."""
@@ -56,6 +60,76 @@ def is_ambiguous(keys, combinations):
                for combo in combinations)
 
 
+# Debug -----------------------------------------------------------------------
+
+def print_devices():
+    for path in evdev.list_devices():
+        evdevice = evdev.InputDevice(path)
+        cap = evdevice.capabilities()
+        if evdev.ecodes.EV_KEY in cap:
+            print("- path : {}".format(evdevice.path))
+            print("  name : {}".format(evdevice.name))
+            keys = [evdev.ecodes.keys[k] for k in cap[evdev.ecodes.EV_KEY]]
+            keys = [k[0] if isinstance(k, list) else k for k in keys]
+            keys = ", ".join(keys)
+            keys = "\n".join(textwrap.wrap(keys, width=65))
+            keys = textwrap.indent(keys, prefix="    ")
+            print("  keys :")
+            print(keys)
+            print()
+
+
+async def probe_events(device, queue):
+    print("monitoring {}".format(device.path))
+    while True:
+        # Read key
+        event = await device.async_read_one()
+        event = evdev.categorize(event)
+
+        if not isinstance(event, evdev.KeyEvent) \
+                or not event.keystate == evdev.KeyEvent.key_up:
+            continue
+
+        if isinstance(event.keycode, list):
+            keycode = [k for k in event.keycode if k != 'BTN_MOUSE'][0]
+        else:
+            keycode = event.keycode
+
+        await queue.put((device.path, keycode))
+
+
+async def log_events(queue):
+    last_path = ""
+    while True:
+        path, keycode = await queue.get()
+        print("{:30s} : {}".format(path if path != last_path else "", keycode))
+        last_path = path
+
+
+def probe_devices():
+    loop = asyncio.new_event_loop()
+    queue = asyncio.Queue(loop=loop)
+
+    for path in evdev.list_devices():
+        device = evdev.InputDevice(path)
+        loop.create_task(probe_events(device, queue))
+
+    loop.create_task(log_events(queue))
+
+    def cleanup(signum, frame):
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, cleanup)
+
+    # prevent worker and children from capturing sigint
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.remove_signal_handler(sig)
+
+    loop.run_forever()
+
+
+# Event loops -----------------------------------------------------------------
+
 async def monitor_events(device, bindings, command_queue):
     logger.info("monitoring device '{}'".format(device.path))
     while True:
@@ -63,7 +137,8 @@ async def monitor_events(device, bindings, command_queue):
         event = await device.async_read_one()
         event = evdev.categorize(event)
 
-        if not isinstance(event, evdev.KeyEvent) or not event.keystate == evdev.KeyEvent.key_up:
+        if not isinstance(event, evdev.KeyEvent) \
+                or not event.keystate == evdev.KeyEvent.key_up:
             continue
 
         if isinstance(event.keycode, list):
@@ -77,7 +152,8 @@ async def monitor_events(device, bindings, command_queue):
                 logger.debug("waiting for more inputs")
                 event = await asyncio.wait_for(device.async_read_one(), timeout=1)
                 event = evdev.categorize(event)
-                if not isinstance(event, evdev.KeyEvent) or not event.keystate == evdev.KeyEvent.key_up:
+                if not isinstance(event, evdev.KeyEvent) \
+                        or not event.keystate == evdev.KeyEvent.key_up:
                     continue
                 if isinstance(event.keycode, list):
                     prefix += ([k for k in event.keycode if k != 'BTN_MOUSE'][0],)
@@ -97,34 +173,52 @@ async def monitor_devices(monitor, bindings, command_queue, tasks):
     evt_queue = asyncio.Queue()
     loop = asyncio.get_event_loop()
 
-    async def cb(device):
-        await evt_queue.put(device)
-
-    def cb2(device):
-        asyncio.run_coroutine_threadsafe(cb(device), loop)
+    def cb(d):
+        asyncio.run_coroutine_threadsafe(evt_queue.put(d), loop)
 
     observer = pyudev.MonitorObserver(
         monitor,
-        callback=cb2,
+        callback=cb,
         daemon=False)
 
     observer.start()
 
     while True:
-        device = await evt_queue.get()
-        if device.action == "add":
-            for path in [device.device_node] + list(device.device_links):
-                if path in bindings:
-                    evdevice = evdev.InputDevice(device.device_node)
-                    task = asyncio.create_task(monitor_events(
-                        evdevice, bindings, command_queue))
-                    tasks[device.device_number] = task, path
-                    logger.info("device '{}' connected".format(path))
-        elif device.action == "remove" and device.device_number in tasks:
-            task, path = tasks.pop(device.device_number)
+        udev_evt = await evt_queue.get()
+        if udev_evt.action == "add" and udev_evt.device_node is not None:
+            if not evdev.util.is_device(udev_evt.device_node):
+                continue
+            try:
+                device = evdev.InputDevice(udev_evt.device_node)
+            except OSError:
+                continue
+
+            if udev_evt.device_node in bindings:
+                bindings_key = udev_evt.device_node
+            if any(path in bindings for path in udev_evt.device_links):
+                for path in udev_evt.device_links:
+                    if path in bindings:
+                        bindings_key = path
+            elif evdev.InputDevice(udev_evt.device_node).name in bindings:
+                bindings_key = evdev.InputDevice(udev_evt.device_node).name
+            else:
+                continue
+
+            task = asyncio.create_task(monitor_events(
+                device, bindings[bindings_key], command_queue))
+
+            tasks[udev_evt.device_number] = task, path
+
+            logger.info("device '{}' connected".format(path))
+
+        elif udev_evt.action == "remove" and udev_evt.device_number in tasks:
+            task, path = tasks.pop(udev_evt.device_number)
             task.cancel()
+
             logger.info("device '{}' disconnected".format(path))
 
+
+# -----------------------------------------------------------------------------
 
 def main():
     argparser = argparse.ArgumentParser()
@@ -132,11 +226,26 @@ def main():
         "--config", "-c",
         default="/etc/input-event-daemon.conf",
         help="configuration file")
+    argparser.add_argument(
+        "--probe",
+        action="store_true",
+        help="log key-presses from all devices for debugging purpose")
+    argparser.add_argument(
+        "--list",
+        action="store_true",
+        help="describe all available devices and exit")
     args = argparser.parse_args()
 
-    # Parse configuration -----------------------------------------------------
+    # Handle special actions instead of running the daemon
+    if args.list:
+        print_devices()
+        sys.exit(0)
+    elif args.probe:
+        probe_devices()
 
-    config = configparser.RawConfigParser()
+    # Parse configuration
+
+    config = configparser.ConfigParser(inline_comment_prefixes=(';', '#'))
     config.read(args.config)
 
     logger.setLevel(config.get('general', 'loglevel', fallback='INFO').upper())
@@ -161,7 +270,7 @@ def main():
 
         bindings[device_name] = dev_bindings
 
-    # Start command runner ----------------------------------------------------
+    # Start command runner
 
     command_queue = multiprocessing.Queue(maxsize=100)
     user = config.get('general', 'user', fallback="nobody")
@@ -185,7 +294,7 @@ def main():
     # make sure to cleanly terminate when killed
     signal.signal(signal.SIGINT, cleanup)
 
-    # Setup hooks -------------------------------------------------------------
+    # Setup hooks
 
     # monitor device plug/unplug
     context = pyudev.Context()
@@ -199,20 +308,24 @@ def main():
 
     for path in evdev.list_devices():
         if path in bindings:
-            device_number = pyudev.Devices.from_device_file(context, path).device_number
-            evdevice = evdev.InputDevice(path)
-            task = loop.create_task(monitor_events(
-                evdevice, bindings[path], command_queue))
-            tasks[device_number] = task, path
+            bindings_key = path
+        elif evdev.InputDevice(path).name in bindings:
+            bindings_key = evdev.InputDevice(path).name
+        else:
+            continue
+
+        device = evdev.InputDevice(path)
+        device_number = pyudev.Devices.from_device_file(context, path).device_number
+        task = loop.create_task(monitor_events(
+            device, bindings[bindings_key], command_queue))
+        tasks[device_number] = task, path
 
     # setup connection/disconnection hook
-    dev_mon_task = loop.create_task(
+    loop.create_task(
         monitor_devices(monitor, bindings, command_queue, tasks))
 
-    # Run event loop ----------------------------------------------------------
-
-    duh = loop.run_until_complete(dev_mon_task)
-    raise duh.exception()
+    # Run event loop
+    loop.run_forever()
 
 
 if __name__ == "__main__":
