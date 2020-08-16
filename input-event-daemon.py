@@ -227,7 +227,7 @@ async def monitor_devices(monitor, bindings, command_queue, tasks):
             if bindings_key is None:
                 continue
 
-            task = asyncio.create_task(monitor_events(
+            task = asyncio.ensure_future(monitor_events(
                 device, bindings[bindings_key], command_queue))
 
             tasks[udev_evt.device_number] = task, udev_evt.device_node
