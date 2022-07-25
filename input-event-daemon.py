@@ -13,6 +13,8 @@ import signal
 import subprocess
 import sys
 
+from matplotlib import cm
+
 import evdev
 
 logging.basicConfig()
@@ -46,6 +48,7 @@ def run_commands(command_queue, user="nobody", group="nobody", timeout=1):
     while True:
         cmd = command_queue.get()
         if cmd is None:
+            logging.error("failed to get command_queuei for running command '{}'".format(cmd))
             return
 
         subprocess.run(cmd, timeout=timeout, shell=True, check=False)
@@ -56,12 +59,13 @@ def is_ambiguous(keys, combinations):
                for combo in combinations)
 
 
-async def event_handler(dev, bindings, command_queue):
+async def event_handler(dev: evdev.InputDevice, bindings: dict, command_queue: multiprocessing.Queue):
     while True:
         # Read key
         event = await dev.async_read_one()
         event = evdev.categorize(event)
-        if not isinstance(event, evdev.KeyEvent) or not event.keystate == evdev.KeyEvent.key_up:
+        if not isinstance(event, evdev.KeyEvent) or event.keystate != evdev.KeyEvent.key_up:
+            logging.debug("ingnoring event {}".format(event))
             continue
         prefix = (event.keycode,)
 
@@ -70,17 +74,20 @@ async def event_handler(dev, bindings, command_queue):
             while is_ambiguous(prefix, bindings.keys()):
                 event = await asyncio.wait_for(dev.async_read_one(), timeout=1)
                 event = evdev.categorize(event)
-                if not isinstance(event, evdev.KeyEvent) or not event.keystate == evdev.KeyEvent.key_up:
+                if not isinstance(event, evdev.KeyEvent) or event.keystate != evdev.KeyEvent.key_up:
                     continue
                 prefix += (event.keycode,)
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as e:
+            logger.error("Timeout while waiting for async coroutine: {}".format(e))
             pass
 
         # Process command
         try:
             if prefix not in bindings.keys():  # erroneous input, discard
+                logging.warning("not binded key: {}".format(prefix))
                 continue
         except TypeError as e:
+            logging.error("type error for key {}".format(prefix))
             continue
 
         for keys, commands in bindings.items():
@@ -133,6 +140,7 @@ def main():
                         if cmd.strip() != ""]
             key = tuple(k.upper().strip() for k in key.split("+"))
             bindings[key] = commands
+            logging.info("adding key binding '{}' with command '{}'".format(key, commands))
 
         # set-up handler loop
         try:
@@ -150,3 +158,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    logging.error("exiting main entry point")
